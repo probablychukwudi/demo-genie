@@ -1,0 +1,10 @@
+{
+  "buildCommand": "npm run build && node scripts/write-netlify-index.mjs",
+  "outputDirectory": "dist/client",
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}

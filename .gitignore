@@ -18,6 +18,8 @@ dist-ssr
 .vinxi
 .tanstack/**
 .nitro
+.netlify
+.vercel
 *.local
 
 # Wrangler / Cloudflare

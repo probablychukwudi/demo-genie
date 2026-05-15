@@ -110,7 +110,18 @@ function HistoryOutputCard({ g, onViewInput }: { g: Generation; onViewInput: () 
 
   return (
     <div className="grid gap-5 rounded-xl border border-border bg-card p-3 transition hover:border-foreground/20 sm:grid-cols-[200px_minmax(0,1fr)_auto]">
-      <DemoThumbnail g={g} visual={visual} />
+      {canPreview ? (
+        <Link
+          to="/preview/$slug"
+          params={{ slug: g.slug }}
+          className="group block rounded-lg outline-none ring-accent/0 transition focus-visible:ring-2"
+          aria-label={`Open ${g.productName} preview`}
+        >
+          <DemoThumbnail g={g} visual={visual} />
+        </Link>
+      ) : (
+        <DemoThumbnail g={g} visual={visual} />
+      )}
 
       <div className="flex min-w-0 flex-col justify-center">
         <div className="flex min-w-0 items-center gap-2">
@@ -338,6 +349,24 @@ function DemoThumbnail({ g, visual }: { g: Generation; visual: DemoVisual }) {
           `linear-gradient(135deg, ${visual.from}, ${visual.to})`,
       }}
     >
+      {canPreview && g.videoUrl && (
+        <>
+          <video
+            src={g.videoUrl}
+            muted
+            playsInline
+            preload="metadata"
+            className="absolute inset-0 h-full w-full object-cover opacity-95 transition duration-300 group-hover:scale-[1.03]"
+            onLoadedMetadata={(event) => {
+              const video = event.currentTarget;
+              if (Number.isFinite(video.duration) && video.duration > 2) {
+                video.currentTime = Math.min(2, video.duration * 0.18);
+              }
+            }}
+          />
+          <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/18 to-black/20" />
+        </>
+      )}
       <div className="absolute inset-0 opacity-[0.16] [background-image:linear-gradient(90deg,#fff_1px,transparent_1px),linear-gradient(#fff_1px,transparent_1px)] [background-size:24px_24px]" />
       <div className="relative flex w-full flex-col justify-between p-3 text-white">
         <div className="flex items-start justify-between gap-2">

@@ -33,7 +33,11 @@ export const Route = createFileRoute("/preview/$slug")({
         { property: "og:title", content: title },
         { property: "og:description", content: description },
         { property: "og:type", content: "video.other" },
+        { property: "og:image", content: "/brand/demogenie-social-card.png" },
+        { property: "og:image:width", content: "1200" },
+        { property: "og:image:height", content: "630" },
         { name: "twitter:card", content: "summary_large_image" },
+        { name: "twitter:image", content: "/brand/demogenie-social-card.png" },
       ],
     };
   },

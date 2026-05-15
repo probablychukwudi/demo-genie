@@ -81,7 +81,11 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
         content: "Turn any product URL into a shareable AI video demo in 90 seconds.",
       },
       { property: "og:type", content: "website" },
-      { name: "twitter:card", content: "summary" },
+      { property: "og:image", content: "/brand/demogenie-social-card.png" },
+      { property: "og:image:width", content: "1200" },
+      { property: "og:image:height", content: "630" },
+      { name: "twitter:card", content: "summary_large_image" },
+      { name: "twitter:image", content: "/brand/demogenie-social-card.png" },
     ],
     links: [
       { rel: "stylesheet", href: appCss },

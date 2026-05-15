@@ -31,6 +31,12 @@ import {
 } from "@/lib/starterTemplates";
 import { saveGeneration } from "@/lib/generations.functions";
 import { createHeyGenLiveGeneration } from "@/lib/heygen.functions";
+import {
+  createRuntimeLiveGeneration,
+  getRuntimeHeyGenVideoStatus,
+  getRuntimeSettings,
+  saveRuntimeGeneration,
+} from "@/lib/netlifyRuntime";
 import { getSettings, type PublicSettings } from "@/lib/settings.functions";
 import { useAppStore } from "@/lib/store";
 import { copyText, exportVideo } from "@/lib/videoExport";
@@ -88,7 +94,7 @@ function Workspace() {
   const starterSnapshotRef = useRef<StarterGeneratedFields | null>(null);
 
   useEffect(() => {
-    getSettingsFn({})
+    getRuntimeSettings(getSettingsFn)
       .then(setSettings)
       .catch(() => setSettings(null));
   }, [getSettingsFn]);
@@ -312,25 +318,49 @@ function Workspace() {
       return { stopped: true };
     }
 
-    const result = await createLiveGenerationFn({
-      data: {
+    const result = await createRuntimeLiveGeneration(
+      {
         inputs: inputSnapshot,
         scenePlan: plannedScenes,
         scriptText: scriptDraft,
       },
-    });
+      createLiveGenerationFn,
+    );
 
     if (stopRef.current) {
       setStoppedAt(3);
       return { stopped: true };
     }
 
+    if (!result.videoUrl && result.videoId) {
+      setLogLines((prev) => [...prev, "-> Waiting for HeyGen render..."]);
+      for (let attempt = 0; attempt < 18; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
+        if (stopRef.current) {
+          setStoppedAt(3);
+          return { stopped: true };
+        }
+        const statusCheck = await getRuntimeHeyGenVideoStatus(result.videoId);
+        if (!statusCheck) break;
+        if (statusCheck.durationSeconds) result.durationSeconds = statusCheck.durationSeconds;
+        if (statusCheck.videoUrl) {
+          result.videoUrl = statusCheck.videoUrl;
+          result.status = "success";
+          break;
+        }
+        setLogLines((prev) => [
+          ...prev,
+          `-> HeyGen status: ${statusCheck.status || "processing"}...`,
+        ]);
+      }
+    }
+
     setLogLines(result.agentSteps);
 
     const status = result.videoUrl ? "success" : "pending";
     const draftSlug = generateMockGeneration(inputSnapshot).slug;
-    const saved = await saveGenerationFn({
-      data: {
+    const saved = await saveRuntimeGeneration(
+      {
         slug: draftSlug,
         productName: inputSnapshot.productName ?? "Untitled Product",
         productUrl: inputSnapshot.url || null,
@@ -350,7 +380,8 @@ function Workspace() {
         heygenVideoId: result.videoId,
         durationSeconds: result.durationSeconds ?? 54,
       },
-    });
+      saveGenerationFn,
+    );
 
     if (result.videoUrl) {
       setVideoReady(true);
@@ -427,8 +458,8 @@ function Workspace() {
     }
     const draft = generateMockGeneration(generatedDraft.inputs);
     try {
-      const result = await saveGenerationFn({
-        data: {
+      const result = await saveRuntimeGeneration(
+        {
           slug: draft.slug,
           productName: generatedDraft.inputs.productName ?? draft.productName,
           productUrl: generatedDraft.inputs.url || null,
@@ -446,7 +477,8 @@ function Workspace() {
           costUsd: 0,
           durationSeconds: 54,
         },
-      });
+        saveGenerationFn,
+      );
       setPublished({ slug: result.slug, views: 0 });
       setLiveSlug(result.slug);
       toast.success("Demo published — Open Preview ↗", {

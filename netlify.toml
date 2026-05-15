@@ -1,9 +1,30 @@
 [build]
   command = "npm run build && node scripts/write-netlify-index.mjs"
   publish = "dist/client"
+  functions = "netlify/functions"
 
 [build.environment]
   NODE_VERSION = "22"
+
+[[redirects]]
+  from = "/api/settings"
+  to = "/.netlify/functions/settings"
+  status = 200
+
+[[redirects]]
+  from = "/api/heygen-live-generation"
+  to = "/.netlify/functions/heygen-live-generation"
+  status = 200
+
+[[redirects]]
+  from = "/api/heygen-video-status"
+  to = "/.netlify/functions/heygen-video-status"
+  status = 200
+
+[[redirects]]
+  from = "/api/save-generation"
+  to = "/.netlify/functions/save-generation"
+  status = 200
 
 [[redirects]]
   from = "/*"

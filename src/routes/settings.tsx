@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { Icon } from "@/components/Icons";
+import { getRuntimeSettings, saveRuntimeSettings } from "@/lib/netlifyRuntime";
 import { getSettings, saveSettings, type PublicSettings } from "@/lib/settings.functions";
 import { useAppStore } from "@/lib/store";
 
@@ -28,7 +29,7 @@ function SettingsPage() {
   const setTheme = useAppStore((state) => state.setTheme);
 
   useEffect(() => {
-    getFn({})
+    getRuntimeSettings(getFn)
       .then(setS)
       .catch((e) => toast.error(e instanceof Error ? e.message : "Failed"));
   }, [getFn]);
@@ -52,7 +53,7 @@ function SettingsPage() {
   ) {
     setSaving(true);
     try {
-      const next = await saveFn({ data: patch });
+      const next = await saveRuntimeSettings(patch, saveFn);
       setS(next);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to save");

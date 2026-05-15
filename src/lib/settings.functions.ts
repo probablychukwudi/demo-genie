@@ -2,6 +2,19 @@ import { createServerFn } from "@tanstack/react-start";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { z } from "zod";
 
+const memorySettings: PublicSettings = {
+  heygenKeyConfigured: Boolean(process.env.HEYGEN_API_KEY),
+  heygenKeyLast4: process.env.HEYGEN_API_KEY ? process.env.HEYGEN_API_KEY.slice(-4) : null,
+  mockMode: true,
+  defaultTone: "Confident",
+  defaultLanguage: "English",
+  defaultTemplate: "Product Launch",
+};
+
+function hasSupabaseAdminEnv() {
+  return Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
+}
+
 export interface PublicSettings {
   heygenKeyConfigured: boolean;
   heygenKeyLast4: string | null;
@@ -12,6 +25,7 @@ export interface PublicSettings {
 }
 
 async function ensureSettingsRow() {
+  if (!hasSupabaseAdminEnv()) return;
   await supabaseAdmin
     .from("settings")
     .upsert({ id: "global" }, { onConflict: "id", ignoreDuplicates: true });
@@ -19,6 +33,8 @@ async function ensureSettingsRow() {
 
 export const getSettings = createServerFn({ method: "GET" }).handler(
   async (): Promise<PublicSettings> => {
+    if (!hasSupabaseAdminEnv()) return memorySettings;
+
     await ensureSettingsRow();
     const { data, error } = await supabaseAdmin
       .from("settings")
@@ -37,7 +53,7 @@ export const getSettings = createServerFn({ method: "GET" }).handler(
       defaultLanguage: data.default_language as string,
       defaultTemplate: data.default_template as string,
     };
-  }
+  },
 );
 
 const SaveSettingsSchema = z.object({
@@ -52,6 +68,20 @@ const SaveSettingsSchema = z.object({
 export const saveSettings = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => SaveSettingsSchema.parse(input))
   .handler(async ({ data }): Promise<PublicSettings> => {
+    if (!hasSupabaseAdminEnv()) {
+      if (data.mockMode !== undefined) memorySettings.mockMode = data.mockMode;
+      if (data.defaultTone) memorySettings.defaultTone = data.defaultTone;
+      if (data.defaultLanguage) memorySettings.defaultLanguage = data.defaultLanguage;
+      if (data.defaultTemplate) memorySettings.defaultTemplate = data.defaultTemplate;
+      if (data.heygenKey) {
+        memorySettings.heygenKeyConfigured = Boolean(process.env.HEYGEN_API_KEY);
+        memorySettings.heygenKeyLast4 = process.env.HEYGEN_API_KEY
+          ? process.env.HEYGEN_API_KEY.slice(-4)
+          : null;
+      }
+      return memorySettings;
+    }
+
     await ensureSettingsRow();
     const update: Record<string, unknown> = {};
     if (data.mockMode !== undefined) update.mock_mode = data.mockMode;

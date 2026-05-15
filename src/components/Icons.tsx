@@ -30,6 +30,14 @@ import {
   X,
   Zap,
   Camera,
+  CircleHelp,
+  Moon,
+  Sun,
+  BarChart3,
+  MoreHorizontal,
+  FileText,
+  WalletCards,
+  Languages,
   type LucideProps,
 } from "lucide-react";
 
@@ -76,4 +84,12 @@ export const Icon = {
   X: wrap(X),
   Zap: wrap(Zap),
   Camera: wrap(Camera),
+  Help: wrap(CircleHelp),
+  Moon: wrap(Moon),
+  Sun: wrap(Sun),
+  Usage: wrap(BarChart3),
+  More: wrap(MoreHorizontal),
+  FileText: wrap(FileText),
+  Wallet: wrap(WalletCards),
+  Languages: wrap(Languages),
 };

@@ -16,6 +16,7 @@ export function VideoPlayer({ src, poster, className = "" }: VideoPlayerProps) {
   const [duration, setDuration] = useState(0);
   const [showCenter, setShowCenter] = useState(true);
   const [isFs, setIsFs] = useState(false);
+  const [errored, setErrored] = useState(false);
 
   useEffect(() => {
     const v = videoRef.current;
@@ -28,13 +29,20 @@ export function VideoPlayer({ src, poster, className = "" }: VideoPlayerProps) {
       setPlaying(false);
       setShowCenter(true);
     };
+    const onError = () => {
+      setErrored(true);
+      setPlaying(false);
+      setShowCenter(false);
+    };
     v.addEventListener("timeupdate", onTime);
     v.addEventListener("loadedmetadata", onTime);
     v.addEventListener("ended", onEnd);
+    v.addEventListener("error", onError);
     return () => {
       v.removeEventListener("timeupdate", onTime);
       v.removeEventListener("loadedmetadata", onTime);
       v.removeEventListener("ended", onEnd);
+      v.removeEventListener("error", onError);
     };
   }, []);
 
@@ -46,11 +54,14 @@ export function VideoPlayer({ src, poster, className = "" }: VideoPlayerProps) {
 
   const toggle = () => {
     const v = videoRef.current;
-    if (!v) return;
+    if (!v || errored) return;
     if (v.paused) {
-      void v.play();
-      setPlaying(true);
-      window.setTimeout(() => setShowCenter(false), 1800);
+      v.play()
+        .then(() => {
+          setPlaying(true);
+          window.setTimeout(() => setShowCenter(false), 1800);
+        })
+        .catch(() => setShowCenter(true));
     } else {
       v.pause();
       setPlaying(false);
@@ -105,6 +116,17 @@ export function VideoPlayer({ src, poster, className = "" }: VideoPlayerProps) {
         onClick={toggle}
       />
 
+      {errored && (
+        <div className="absolute inset-0 grid place-items-center bg-black px-6 text-center">
+          <div>
+            <div className="text-sm font-semibold">Video unavailable</div>
+            <p className="mt-1 text-xs text-foreground/60">
+              The render could not be loaded. Regenerate or check the video URL.
+            </p>
+          </div>
+        </div>
+      )}
+
       {showCenter && (
         <button
           type="button"
@@ -112,7 +134,11 @@ export function VideoPlayer({ src, poster, className = "" }: VideoPlayerProps) {
           aria-label={playing ? "Pause" : "Play"}
           className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex h-16 w-16 items-center justify-center rounded-full bg-background/80 text-foreground backdrop-blur transition hover:scale-105 hover:bg-background"
         >
-          {playing ? <Icon.Pause className="h-7 w-7" /> : <Icon.Play className="h-7 w-7 translate-x-0.5" />}
+          {playing ? (
+            <Icon.Pause className="h-7 w-7" />
+          ) : (
+            <Icon.Play className="h-7 w-7 translate-x-0.5" />
+          )}
         </button>
       )}
 
@@ -122,8 +148,14 @@ export function VideoPlayer({ src, poster, className = "" }: VideoPlayerProps) {
       </div>
 
       {/* Control bar */}
-      <div className={`absolute inset-x-0 bottom-0 flex items-center gap-3 bg-gradient-to-t from-black/85 to-transparent px-3 pb-2 pt-6 ${isFs ? "opacity-100" : ""}`}>
-        <button onClick={toggle} aria-label="Play/pause" className="text-foreground/90 hover:text-foreground">
+      <div
+        className={`absolute inset-x-0 bottom-0 flex items-center gap-3 bg-gradient-to-t from-black/85 to-transparent px-3 pb-2 pt-6 ${isFs ? "opacity-100" : ""}`}
+      >
+        <button
+          onClick={toggle}
+          aria-label="Play/pause"
+          className="text-foreground/90 hover:text-foreground"
+        >
           {playing ? <Icon.Pause className="h-4 w-4" /> : <Icon.Play className="h-4 w-4" />}
         </button>
         <div
@@ -138,10 +170,18 @@ export function VideoPlayer({ src, poster, className = "" }: VideoPlayerProps) {
         <span className="font-mono text-[11px] tabular-nums text-foreground/80">
           {fmt(progress)} / {fmt(duration)}
         </span>
-        <button onClick={toggleMute} aria-label="Mute" className="text-foreground/90 hover:text-foreground">
+        <button
+          onClick={toggleMute}
+          aria-label="Mute"
+          className="text-foreground/90 hover:text-foreground"
+        >
           {muted ? <Icon.VolumeMute className="h-4 w-4" /> : <Icon.Volume className="h-4 w-4" />}
         </button>
-        <button onClick={toggleFs} aria-label="Fullscreen" className="text-foreground/90 hover:text-foreground">
+        <button
+          onClick={toggleFs}
+          aria-label="Fullscreen"
+          className="text-foreground/90 hover:text-foreground"
+        >
           <Icon.Maximize className="h-4 w-4" />
         </button>
       </div>

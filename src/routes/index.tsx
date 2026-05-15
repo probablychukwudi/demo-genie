@@ -20,11 +20,20 @@ import {
   buildScenePlan,
   buildScriptText,
   generateMockGeneration,
-  makeSlug,
   mockFetchProduct,
 } from "@/lib/mockData";
+import {
+  STARTER_TEMPLATES,
+  buildStarterFields,
+  getStarterTemplate,
+  type StarterGeneratedFields,
+  type StarterTemplateId,
+} from "@/lib/starterTemplates";
 import { saveGeneration } from "@/lib/generations.functions";
+import { createHeyGenLiveGeneration } from "@/lib/heygen.functions";
+import { getSettings, type PublicSettings } from "@/lib/settings.functions";
 import { useAppStore } from "@/lib/store";
+import { copyText, exportVideo } from "@/lib/videoExport";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -32,8 +41,7 @@ export const Route = createFileRoute("/")({
       { title: "DemoGenie — Workspace" },
       {
         name: "description",
-        content:
-          "Generate a shareable product demo video from any URL in 90 seconds.",
+        content: "Generate a shareable product demo video from any URL in 90 seconds.",
       },
     ],
   }),
@@ -41,47 +49,77 @@ export const Route = createFileRoute("/")({
 });
 
 type Phase = "idle" | "running" | "stopped" | "success" | "error";
+type GeneratedDraft = {
+  inputs: GenerationInputs;
+  scenePlan: Scene[];
+  scriptText: string;
+  videoUrl: string;
+};
 
 function Workspace() {
   const setLiveSlug = useAppStore((s) => s.setLiveSlug);
   const saveGenerationFn = useServerFn(saveGeneration);
+  const getSettingsFn = useServerFn(getSettings);
+  const createLiveGenerationFn = useServerFn(createHeyGenLiveGeneration);
 
   const [inputs, setInputs] = useState<GenerationInputs>(SEED_INPUTS);
   const [fetching, setFetching] = useState(false);
-
-  // Seed the right panel with a fully-completed mock generation so all states
-  // (agent log, scene plan, video, publish receipt) are visible on first load.
-  const seededScenes = useMemo(() => buildScenePlan(SEED_INPUTS), []);
-  const seededScript = useMemo(
-    () => buildScriptText(SEED_INPUTS, seededScenes),
-    [seededScenes]
-  );
-  const seededLog = useMemo(
-    () => [
-      ...AGENT_STEPS.map((s) => s.replace("{{tone}}", SEED_INPUTS.tone)),
-      "✓ Generation complete. Duration: 8.3s",
-    ],
-    []
-  );
+  const [selectedStarterId, setSelectedStarterId] = useState<StarterTemplateId | null>(null);
+  const [settings, setSettings] = useState<PublicSettings | null>(null);
+  const [sourceOpen, setSourceOpen] = useState(false);
 
   const [phase, setPhase] = useState<Phase>("idle");
-  const [logLines, setLogLines] = useState<string[]>(seededLog);
-  const [scenePlan, setScenePlan] = useState<Scene[]>(seededScenes);
-  const [scenesScripted, setScenesScripted] = useState(true);
-  const [videoReady, setVideoReady] = useState(true);
-  const [scriptText, setScriptText] = useState<string>(seededScript);
+  const [logLines, setLogLines] = useState<string[]>([]);
+  const [scenePlan, setScenePlan] = useState<Scene[]>([]);
+  const [scenesScripted, setScenesScripted] = useState(false);
+  const [videoReady, setVideoReady] = useState(false);
+  const [scriptText, setScriptText] = useState<string>("");
   const [stoppedAt, setStoppedAt] = useState<number | null>(null);
+  const [generatedDraft, setGeneratedDraft] = useState<GeneratedDraft | null>(null);
+  const [isOutputDirty, setIsOutputDirty] = useState(false);
 
-  const [published, setPublished] = useState<{ slug: string; views: number } | null>({
-    slug: "acme-x42z",
-    views: 247,
-  });
+  const [published, setPublished] = useState<{ slug: string; views: number } | null>(null);
 
   const [drawerScene, setDrawerScene] = useState<Scene | null>(null);
   const [splitPct, setSplitPct] = useState(42);
 
   const stopRef = useRef(false);
   const logBoxRef = useRef<HTMLDivElement>(null);
+  const starterSnapshotRef = useRef<StarterGeneratedFields | null>(null);
+
+  useEffect(() => {
+    getSettingsFn({})
+      .then(setSettings)
+      .catch(() => setSettings(null));
+  }, [getSettingsFn]);
+
+  useEffect(() => {
+    const raw = window.sessionStorage.getItem("demogenie:workspace-intent");
+    if (!raw) return;
+    window.sessionStorage.removeItem("demogenie:workspace-intent");
+    try {
+      const payload = JSON.parse(raw) as {
+        action?: "load" | "generate" | "duplicate" | "regenerate";
+        inputs?: GenerationInputs;
+      };
+      if (!payload.inputs) return;
+      setInputs(payload.inputs);
+      setSelectedStarterId(null);
+      starterSnapshotRef.current = null;
+      resetOutput();
+      setPhase("idle");
+      if (payload.action === "generate" || payload.action === "regenerate") {
+        window.setTimeout(() => void handleGenerate(payload.inputs), 120);
+      } else {
+        toast.success("Input loaded into workspace");
+      }
+    } catch {
+      toast.error("Could not load that saved input");
+    }
+    // One-shot bootstrap for History actions. Including handleGenerate here
+    // would rerun saved intents when local workspace state changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ----- View counter for the published demo (tick every 7s for "live" feel) -----
   useEffect(() => {
@@ -100,6 +138,62 @@ function Workspace() {
 
   function setField<K extends keyof GenerationInputs>(key: K, value: GenerationInputs[K]) {
     setInputs((prev) => ({ ...prev, [key]: value }));
+    if (videoReady) setIsOutputDirty(true);
+  }
+
+  function applyStarter(starterId: StarterTemplateId, announce = true) {
+    const companyName = inputs.productName?.trim() || "Your product";
+    const fields = buildStarterFields(starterId, companyName);
+    const starter = getStarterTemplate(starterId);
+
+    setSelectedStarterId(starterId);
+    starterSnapshotRef.current = fields;
+    setInputs((prev) => ({
+      ...prev,
+      productName: companyName,
+      ...fields,
+    }));
+    if (videoReady) setIsOutputDirty(true);
+    if (announce && starter) toast.success(`Starter applied: ${starter.label}`);
+  }
+
+  function updateCompanyNameWithStarter(
+    prev: GenerationInputs,
+    productName: string,
+    previousStarter: StarterGeneratedFields | null,
+    nextStarter: StarterGeneratedFields | null,
+  ) {
+    if (!previousStarter || !nextStarter) {
+      return { ...prev, productName };
+    }
+
+    return {
+      ...prev,
+      productName,
+      brief: prev.brief === previousStarter.brief ? nextStarter.brief : prev.brief,
+      readme: prev.readme === previousStarter.readme ? nextStarter.readme : prev.readme,
+      changelog:
+        prev.changelog === previousStarter.changelog ? nextStarter.changelog : prev.changelog,
+      ctaText: prev.ctaText === previousStarter.ctaText ? nextStarter.ctaText : prev.ctaText,
+      audience: prev.audience === previousStarter.audience ? nextStarter.audience : prev.audience,
+      tone: prev.tone === previousStarter.tone ? nextStarter.tone : prev.tone,
+      language: prev.language === previousStarter.language ? nextStarter.language : prev.language,
+      template: prev.template === previousStarter.template ? nextStarter.template : prev.template,
+    };
+  }
+
+  function handleCompanyNameChange(productName: string) {
+    const previousStarter = starterSnapshotRef.current;
+    const nextStarter =
+      selectedStarterId && previousStarter
+        ? buildStarterFields(selectedStarterId, productName)
+        : null;
+
+    setInputs((prev) =>
+      updateCompanyNameWithStarter(prev, productName, previousStarter, nextStarter),
+    );
+    if (nextStarter) starterSnapshotRef.current = nextStarter;
+    if (videoReady) setIsOutputDirty(true);
   }
 
   async function handleFetchUrl() {
@@ -110,11 +204,26 @@ function Workspace() {
     setFetching(true);
     await new Promise((r) => setTimeout(r, 1400));
     const out = mockFetchProduct(inputs.url);
-    setInputs((prev) => ({
-      ...prev,
-      productName: out.productName,
-      brief: out.brief,
-    }));
+    const previousStarter = starterSnapshotRef.current;
+    const nextStarter =
+      selectedStarterId && previousStarter
+        ? buildStarterFields(selectedStarterId, out.productName)
+        : null;
+    setInputs((prev) => {
+      const next = updateCompanyNameWithStarter(
+        prev,
+        out.productName,
+        previousStarter,
+        nextStarter,
+      );
+      if (nextStarter) return next;
+      return {
+        ...next,
+        brief: out.brief,
+      };
+    });
+    if (nextStarter) starterSnapshotRef.current = nextStarter;
+    if (videoReady) setIsOutputDirty(true);
     setFetching(false);
     toast.success(`Fetched ${out.productName}`);
   }
@@ -127,11 +236,14 @@ function Workspace() {
     setScriptText("");
     setStoppedAt(null);
     setPublished(null);
+    setGeneratedDraft(null);
+    setIsOutputDirty(false);
   }
 
-  async function streamGeneration(): Promise<{ stopped: boolean }> {
+  async function streamGeneration(inputOverride: GenerationInputs): Promise<{ stopped: boolean }> {
     stopRef.current = false;
-    const lines = AGENT_STEPS.map((s) => s.replace("{{tone}}", inputs.tone));
+    const inputSnapshot = { ...inputOverride };
+    const lines = AGENT_STEPS.map((s) => s.replace("{{tone}}", inputSnapshot.tone));
     let plannedScenes: Scene[] | null = null;
     let scriptDraft = "";
 
@@ -151,31 +263,130 @@ function Workspace() {
 
       // After "Writing scene plan" (index 3), reveal the scene cards.
       if (i === 3) {
-        plannedScenes = buildScenePlan(inputs);
+        plannedScenes = buildScenePlan(inputSnapshot);
         setScenePlan(plannedScenes);
       }
       // After "Generating script" (index 4), flip cards to "Scripted ✓".
       if (i === 4 && plannedScenes) {
-        scriptDraft = buildScriptText(inputs, plannedScenes);
+        scriptDraft = buildScriptText(inputSnapshot, plannedScenes);
         setScriptText(scriptDraft);
         setScenesScripted(true);
       }
       // After last step, reveal the video.
       if (i === 5) {
         setVideoReady(true);
+        const finalScenes = plannedScenes ?? buildScenePlan(inputSnapshot);
+        const finalScript = scriptDraft || buildScriptText(inputSnapshot, finalScenes);
+        setGeneratedDraft({
+          inputs: inputSnapshot,
+          scenePlan: finalScenes,
+          scriptText: finalScript,
+          videoUrl: MOCK_VIDEO_URL,
+        });
+        setIsOutputDirty(false);
       }
     }
     setLogLines((prev) => [...prev, "✓ Generation complete. Duration: 8.3s"]);
     return { stopped: false };
   }
 
-  async function handleGenerate() {
+  async function streamLiveGeneration(
+    inputOverride: GenerationInputs,
+  ): Promise<{ stopped: boolean }> {
+    stopRef.current = false;
+    const inputSnapshot = { ...inputOverride };
+    const plannedScenes = buildScenePlan(inputSnapshot);
+    const scriptDraft = buildScriptText(inputSnapshot, plannedScenes);
+
+    setLogLines([
+      "→ Validating server-only HeyGen key...",
+      "→ Preparing Video Agent prompt from product context...",
+      "→ Estimated live render cost: $1.37...",
+    ]);
+    setScenePlan(plannedScenes);
+    setScriptText(scriptDraft);
+    setScenesScripted(true);
+
+    if (stopRef.current) {
+      setStoppedAt(2);
+      return { stopped: true };
+    }
+
+    const result = await createLiveGenerationFn({
+      data: {
+        inputs: inputSnapshot,
+        scenePlan: plannedScenes,
+        scriptText: scriptDraft,
+      },
+    });
+
+    if (stopRef.current) {
+      setStoppedAt(3);
+      return { stopped: true };
+    }
+
+    setLogLines(result.agentSteps);
+
+    const status = result.videoUrl ? "success" : "pending";
+    const draftSlug = generateMockGeneration(inputSnapshot).slug;
+    const saved = await saveGenerationFn({
+      data: {
+        slug: draftSlug,
+        productName: inputSnapshot.productName ?? "Untitled Product",
+        productUrl: inputSnapshot.url || null,
+        brief: inputSnapshot.brief,
+        ctaText: inputSnapshot.ctaText,
+        audience: inputSnapshot.audience,
+        tone: inputSnapshot.tone,
+        language: inputSnapshot.language,
+        template: inputSnapshot.template,
+        scenePlan: plannedScenes,
+        scriptText: scriptDraft,
+        videoUrl: result.videoUrl,
+        status,
+        generationMode: "live",
+        costUsd: status === "success" ? result.estimatedCostUsd : null,
+        heygenSessionId: result.sessionId,
+        heygenVideoId: result.videoId,
+        durationSeconds: result.durationSeconds ?? 54,
+      },
+    });
+
+    if (result.videoUrl) {
+      setVideoReady(true);
+      setGeneratedDraft({
+        inputs: inputSnapshot,
+        scenePlan: plannedScenes,
+        scriptText: scriptDraft,
+        videoUrl: result.videoUrl,
+      });
+      setPublished({ slug: saved.slug, views: 0 });
+      setLiveSlug(saved.slug);
+      setIsOutputDirty(false);
+      toast.success("HeyGen live render complete");
+    } else {
+      setVideoReady(false);
+      setGeneratedDraft(null);
+      toast.info("HeyGen render queued. Reopen Demo Library to check status.");
+    }
+
+    return { stopped: false };
+  }
+
+  async function handleGenerate(inputOverride?: GenerationInputs) {
     if (phase === "running") return;
+    const generationInputs = inputOverride ?? inputs;
     resetOutput();
     setPhase("running");
 
     try {
-      const { stopped } = await streamGeneration();
+      const liveMode = settings && !settings.mockMode;
+      if (liveMode && !settings.heygenKeyConfigured) {
+        throw new Error("Live mode is enabled, but HEYGEN_API_KEY is not configured server-side.");
+      }
+      const { stopped } = liveMode
+        ? await streamLiveGeneration(generationInputs)
+        : await streamGeneration(generationInputs);
       if (stopped) {
         setPhase("stopped");
         toast.warning("Generation stopped");
@@ -184,9 +395,9 @@ function Workspace() {
       setPhase("success");
       // Brief green flash via phase
       window.setTimeout(() => setPhase("idle"), 700);
-    } catch {
+    } catch (e) {
       setPhase("error");
-      toast.error("Generation failed. Check your inputs.");
+      toast.error(e instanceof Error ? e.message : "Generation failed. Check your inputs.");
     }
   }
 
@@ -198,25 +409,41 @@ function Workspace() {
     void handleGenerate();
   }
 
+  function handleExportVideo() {
+    const videoUrl = generatedDraft?.videoUrl;
+    if (!videoUrl) {
+      toast.error("Generate a video before exporting.");
+      return;
+    }
+    void exportVideo(videoUrl, generatedDraft.inputs.productName);
+  }
+
   async function handlePublish() {
-    if (!videoReady || scenePlan.length === 0) return;
-    const draft = generateMockGeneration(inputs);
+    if (!videoReady || !generatedDraft || scenePlan.length === 0 || isOutputDirty) {
+      toast.error(
+        isOutputDirty ? "Regenerate before publishing edited inputs." : "Generate a demo first.",
+      );
+      return;
+    }
+    const draft = generateMockGeneration(generatedDraft.inputs);
     try {
       const result = await saveGenerationFn({
         data: {
           slug: draft.slug,
-          productName: draft.productName,
-          productUrl: inputs.url || null,
-          brief: inputs.brief,
-          ctaText: inputs.ctaText,
-          audience: inputs.audience,
-          tone: inputs.tone,
-          language: inputs.language,
-          template: inputs.template,
-          scenePlan: scenePlan,
-          scriptText: scriptText,
-          videoUrl: MOCK_VIDEO_URL,
+          productName: generatedDraft.inputs.productName ?? draft.productName,
+          productUrl: generatedDraft.inputs.url || null,
+          brief: generatedDraft.inputs.brief,
+          ctaText: generatedDraft.inputs.ctaText,
+          audience: generatedDraft.inputs.audience,
+          tone: generatedDraft.inputs.tone,
+          language: generatedDraft.inputs.language,
+          template: generatedDraft.inputs.template,
+          scenePlan: generatedDraft.scenePlan,
+          scriptText: generatedDraft.scriptText,
+          videoUrl: generatedDraft.videoUrl,
           status: "success",
+          generationMode: "mock",
+          costUsd: 0,
           durationSeconds: 54,
         },
       });
@@ -225,8 +452,7 @@ function Workspace() {
       toast.success("Demo published — Open Preview ↗", {
         action: {
           label: "Open",
-          onClick: () =>
-            window.open(`/preview/${result.slug}`, "_blank", "noopener,noreferrer"),
+          onClick: () => window.open(`/preview/${result.slug}`, "_blank", "noopener,noreferrer"),
         },
         duration: 4000,
       });
@@ -239,7 +465,9 @@ function Workspace() {
   function handleDownloadScript() {
     const text =
       `${inputs.productName ?? "Demo"} — Scene Plan\n\n` +
-      scenePlan.map((s) => `${s.number} — ${s.title} (${s.duration})\n${s.description}`).join("\n\n") +
+      scenePlan
+        .map((s) => `${s.number} — ${s.title} (${s.duration})\n${s.description}`)
+        .join("\n\n") +
       `\n\n— Script —\n\n${scriptText}`;
     const blob = new Blob([text], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
@@ -251,14 +479,24 @@ function Workspace() {
   }
 
   function handleShare() {
-    const slug = published?.slug ?? makeSlug();
-    const url = `${window.location.origin}/preview/${slug}`;
-    void navigator.clipboard.writeText(url);
-    toast.success("Link copied!");
+    if (!published) {
+      toast.error("Publish the demo before sharing.");
+      return;
+    }
+    const url = `${window.location.origin}/preview/${published.slug}`;
+    void copyText(url).then((ok) =>
+      toast[ok ? "success" : "error"](ok ? "Link copied!" : "Copy failed"),
+    );
   }
 
   // ----- Render -----
-  const showLog = phase !== "idle" || logLines.length > 0 || scenePlan.length > 0 || videoReady || stoppedAt !== null;
+  const showLog =
+    phase !== "idle" ||
+    logLines.length > 0 ||
+    scenePlan.length > 0 ||
+    videoReady ||
+    stoppedAt !== null;
+  const selectedStarter = selectedStarterId ? getStarterTemplate(selectedStarterId) : null;
 
   return (
     <div
@@ -275,7 +513,7 @@ function Workspace() {
       <div className="flex h-full">
         {/* LEFT — input panel */}
         <section
-          className="flex h-full flex-col overflow-y-auto border-r border-border bg-background px-8 py-8"
+          className="flex h-full flex-col overflow-hidden border-r border-border bg-background px-7 py-7"
           style={{ width: `${splitPct}%` }}
         >
           <header className="mb-6">
@@ -290,8 +528,56 @@ function Workspace() {
             </p>
           </header>
 
-          <div className="space-y-5">
-            {/* URL */}
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1 pb-5">
+            <div className="rounded-xl border border-border bg-card/45 p-3">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-sm font-semibold">Starter kit</h2>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    Pick a proven story, then customize any field.
+                  </p>
+                </div>
+                {selectedStarter && (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-accent/35 bg-accent-glow px-2.5 py-1 text-xs text-accent">
+                    <Icon.Check className="h-3 w-3" />
+                    Starter applied: {selectedStarter.label}
+                  </span>
+                )}
+              </div>
+
+              <div className="grid gap-3 2xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+                <Field label="Company / Product name">
+                  <input
+                    type="text"
+                    value={inputs.productName ?? ""}
+                    onChange={(e) => handleCompanyNameChange(e.target.value)}
+                    placeholder="AcmeCloud"
+                    className={inputClass}
+                  />
+                </Field>
+                <Field label="Starter">
+                  <StarterDropdown
+                    value={selectedStarterId}
+                    onChange={(starterId) => applyStarter(starterId)}
+                  />
+                </Field>
+              </div>
+
+              {selectedStarter && (
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                  <span>Manual edits are preserved when the company name changes.</span>
+                  <button
+                    type="button"
+                    onClick={() => applyStarter(selectedStarter.id)}
+                    className="inline-flex items-center gap-1 rounded-md border border-border bg-elevated px-2.5 py-1.5 font-medium text-foreground transition hover:bg-background"
+                  >
+                    <Icon.Refresh className="h-3.5 w-3.5" />
+                    Reapply starter
+                  </button>
+                </div>
+              )}
+            </div>
+
             <Field label="Product URL">
               <div className="flex gap-2">
                 <input
@@ -316,34 +602,16 @@ function Workspace() {
               </div>
             </Field>
 
-            <Field label="README / Docs">
-              <textarea
-                rows={5}
-                value={inputs.readme}
-                onChange={(e) => setField("readme", e.target.value)}
-                className={`${inputClass} font-mono text-[13px] leading-relaxed`}
-              />
-            </Field>
-
-            <Field label="Latest Changelog">
-              <textarea
-                rows={4}
-                value={inputs.changelog}
-                onChange={(e) => setField("changelog", e.target.value)}
-                className={`${inputClass} font-mono text-[13px] leading-relaxed`}
-              />
-            </Field>
-
             <Field label="Product Brief">
               <textarea
-                rows={4}
+                rows={3}
                 value={inputs.brief}
                 onChange={(e) => setField("brief", e.target.value)}
                 className={inputClass}
               />
             </Field>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid gap-4 2xl:grid-cols-2">
               <Field label="CTA Text">
                 <input
                   type="text"
@@ -364,43 +632,90 @@ function Workspace() {
               </Field>
             </div>
 
-            <Field label="Tone">
-              <SegmentedTone value={inputs.tone} onChange={(t) => setField("tone", t)} />
-            </Field>
+            <div className="grid gap-4 2xl:grid-cols-[minmax(0,1.35fr)_minmax(150px,0.65fr)]">
+              <Field label="Tone">
+                <SegmentedTone value={inputs.tone} onChange={(t) => setField("tone", t)} />
+              </Field>
 
-            <Field label="Language">
-              <select
-                value={inputs.language}
-                onChange={(e) => setField("language", e.target.value as Language)}
-                className={inputClass}
-              >
-                {(["English", "Spanish", "French", "German", "Japanese"] as Language[]).map(
-                  (l) => (
-                    <option key={l} value={l}>
-                      {l}
-                    </option>
-                  )
-                )}
-              </select>
-            </Field>
+              <Field label="Language">
+                <select
+                  value={inputs.language}
+                  onChange={(e) => setField("language", e.target.value as Language)}
+                  className={inputClass}
+                >
+                  {(["English", "Spanish", "French", "German", "Japanese"] as Language[]).map(
+                    (l) => (
+                      <option key={l} value={l}>
+                        {l}
+                      </option>
+                    ),
+                  )}
+                </select>
+              </Field>
+            </div>
 
             <Field label="Template">
-              <TemplateRow
-                value={inputs.template}
-                onChange={(t) => setField("template", t)}
-              />
+              <TemplateRow value={inputs.template} onChange={(t) => setField("template", t)} />
             </Field>
 
-            {/* Generate button */}
-            <div className="pt-2">
-              <GenerateButton
-                phase={phase}
-                stoppedAt={stoppedAt}
-                onGenerate={handleGenerate}
-                onStop={handleStop}
-                onRestart={handleRestart}
-              />
+            <div className="border-t border-border pt-4">
+              <button
+                type="button"
+                onClick={() => setSourceOpen((open) => !open)}
+                className="flex w-full items-center justify-between gap-3 rounded-lg border border-border bg-card px-3 py-2 text-left transition hover:bg-elevated"
+              >
+                <span>
+                  <span className="block text-sm font-semibold">Source context</span>
+                  <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">
+                    README/docs and changelog. Optional, but useful for sharper scripts.
+                  </span>
+                </span>
+                <Icon.ChevronRight
+                  className={`h-4 w-4 shrink-0 text-muted-foreground transition ${
+                    sourceOpen ? "rotate-90" : ""
+                  }`}
+                />
+              </button>
+
+              {sourceOpen && (
+                <div className="mt-3 space-y-3">
+                  <Field label="README / Docs">
+                    <textarea
+                      rows={3}
+                      value={inputs.readme}
+                      onChange={(e) => setField("readme", e.target.value)}
+                      className={`${inputClass} font-mono text-[13px] leading-relaxed`}
+                    />
+                  </Field>
+
+                  <Field label="Latest Changelog">
+                    <textarea
+                      rows={2}
+                      value={inputs.changelog}
+                      onChange={(e) => setField("changelog", e.target.value)}
+                      className={`${inputClass} font-mono text-[13px] leading-relaxed`}
+                    />
+                  </Field>
+                </div>
+              )}
             </div>
+          </div>
+          <div className="border-t border-border bg-background pt-4">
+            {settings && !settings.mockMode && (
+              <div className="mb-3 flex items-center gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
+                <Icon.Alert className="h-3.5 w-3.5" />
+                Live HeyGen mode · estimated $1.37 from the hackathon budget
+              </div>
+            )}
+            <GenerateButton
+              phase={phase}
+              stoppedAt={stoppedAt}
+              dirty={isOutputDirty}
+              liveMode={Boolean(settings && !settings.mockMode)}
+              onGenerate={handleGenerate}
+              onStop={handleStop}
+              onRestart={handleRestart}
+            />
           </div>
         </section>
 
@@ -428,10 +743,9 @@ function Workspace() {
                 animate={{ y: 0, opacity: 1 }}
                 exit={{ opacity: 0 }}
                 transition={{ duration: 0.28, ease: "easeOut" }}
-                className="rounded-xl border border-border"
-                style={{ background: "#09090c" }}
+                className="agent-trace-surface rounded-xl border border-border"
               >
-                <div className="flex items-center justify-between border-b border-border px-4 py-2">
+                <div className="agent-trace-header flex items-center justify-between border-b border-border px-4 py-2">
                   <div className="flex items-center gap-2 text-sm font-medium">
                     <Icon.Activity className="h-4 w-4" />
                     Agent Trace
@@ -450,7 +764,7 @@ function Workspace() {
                 </div>
                 <div
                   ref={logBoxRef}
-                  className="mono-log max-h-[180px] min-h-[180px] overflow-y-auto px-4 py-3 font-mono text-[13px] leading-relaxed text-mono"
+                  className="mono-log max-h-[124px] min-h-[124px] overflow-y-auto px-4 py-3 font-mono text-[12px] leading-5 text-mono"
                 >
                   {logLines.map((line, i) => (
                     <motion.div
@@ -458,9 +772,7 @@ function Workspace() {
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
                       transition={{ duration: 0.18 }}
-                      className={
-                        line.startsWith("✓") ? "text-success" : "text-mono"
-                      }
+                      className={line.startsWith("✓") ? "text-success" : "agent-trace-line"}
                     >
                       {line}
                     </motion.div>
@@ -494,7 +806,7 @@ function Workspace() {
                 <div className="mb-3 flex items-center gap-2 text-sm font-medium">
                   <Icon.Film className="h-4 w-4" /> Scene Plan
                 </div>
-                <div className="flex gap-3 overflow-x-auto pb-1">
+                <div className="grid gap-3 xl:grid-cols-3">
                   {scenePlan.map((s, i) => (
                     <motion.button
                       key={s.number}
@@ -502,14 +814,14 @@ function Workspace() {
                       animate={{ opacity: 1, y: 0 }}
                       transition={{ delay: i * 0.12 }}
                       onClick={() => setDrawerScene(s)}
-                      className="group relative flex w-72 shrink-0 flex-col gap-2 rounded-xl border border-border bg-card p-4 text-left transition hover:border-accent/60"
+                      className="group relative flex min-w-0 flex-col gap-2 rounded-xl border border-border bg-card p-4 text-left transition hover:border-accent/60"
                     >
                       <div className="inline-flex w-fit items-center gap-1 rounded-md bg-accent-glow px-2 py-0.5 text-xs font-medium text-accent">
                         {s.number}
                       </div>
-                      <div className="text-base font-semibold">{s.title}</div>
+                      <div className="truncate text-base font-semibold">{s.title}</div>
                       <div className="text-xs text-muted-foreground">{s.duration}</div>
-                      <p className="text-sm text-foreground/85">{s.description}</p>
+                      <p className="line-clamp-2 text-sm text-foreground/85">{s.description}</p>
                       <div className="mt-1">
                         {scenesScripted ? (
                           <span className="inline-flex items-center gap-1 rounded-md bg-success/10 px-2 py-0.5 text-xs text-success">
@@ -538,11 +850,13 @@ function Workspace() {
                 transition={{ duration: 0.3 }}
                 className="mt-6"
               >
-                <VideoPlayer src={MOCK_VIDEO_URL} />
+                <VideoPlayer src={generatedDraft?.videoUrl ?? MOCK_VIDEO_URL} />
                 <div className="mt-3 flex flex-wrap items-center gap-2">
                   <button
                     onClick={handlePublish}
-                    className="inline-flex items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-foreground transition hover:bg-accent-hover"
+                    disabled={isOutputDirty || !generatedDraft}
+                    data-cursor="deploy"
+                    className="publish-button inline-flex items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-foreground transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <Icon.Upload className="h-4 w-4" /> Publish Demo
                   </button>
@@ -553,6 +867,12 @@ function Workspace() {
                     <Icon.Refresh className="h-4 w-4" /> Regenerate
                   </button>
                   <button
+                    onClick={handleExportVideo}
+                    className="inline-flex items-center gap-2 rounded-md border border-border bg-elevated px-3 py-2 text-sm transition hover:bg-card"
+                  >
+                    <Icon.Download className="h-4 w-4" /> Export MP4
+                  </button>
+                  <button
                     onClick={handleDownloadScript}
                     className="inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm text-muted-foreground transition hover:text-foreground"
                   >
@@ -560,7 +880,8 @@ function Workspace() {
                   </button>
                   <button
                     onClick={handleShare}
-                    className="ml-auto inline-flex h-9 w-9 items-center justify-center rounded-md border border-border text-muted-foreground transition hover:text-foreground"
+                    disabled={!published}
+                    className="ml-auto inline-flex h-9 w-9 items-center justify-center rounded-md border border-border text-muted-foreground transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
                     aria-label="Copy share link"
                   >
                     <Icon.Share className="h-4 w-4" />
@@ -569,6 +890,13 @@ function Workspace() {
               </motion.div>
             )}
           </AnimatePresence>
+
+          {isOutputDirty && videoReady && (
+            <div className="mt-3 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
+              Inputs changed after the last render. Regenerate before publishing so the public
+              preview matches the video.
+            </div>
+          )}
 
           {/* Section D — Publish confirmation */}
           <AnimatePresence>
@@ -596,10 +924,10 @@ function Workspace() {
                   </a>
                   <button
                     onClick={() => {
-                      void navigator.clipboard.writeText(
-                        `${window.location.origin}/preview/${published.slug}`
+                      void copyText(`${window.location.origin}/preview/${published.slug}`).then(
+                        (ok) =>
+                          toast[ok ? "success" : "error"](ok ? "Link copied!" : "Copy failed"),
                       );
-                      toast.success("Link copied!");
                     }}
                     className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm transition hover:bg-elevated"
                   >
@@ -671,22 +999,95 @@ const inputClass =
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <label className="block">
+    <div className="block">
       <div className="mb-1.5 text-xs font-medium uppercase tracking-wider text-muted-foreground">
         {label}
       </div>
       {children}
-    </label>
+    </div>
   );
 }
 
-function SegmentedTone({
+function StarterDropdown({
   value,
   onChange,
 }: {
-  value: Tone;
-  onChange: (t: Tone) => void;
+  value: StarterTemplateId | null;
+  onChange: (starterId: StarterTemplateId) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const selected = value ? getStarterTemplate(value) : null;
+
+  useEffect(() => {
+    if (!open) return;
+    function handlePointerDown(event: PointerEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => window.removeEventListener("pointerdown", handlePointerDown);
+  }, [open]);
+
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="flex min-h-10 w-full items-center justify-between gap-3 rounded-md border border-border bg-card px-3 py-2 text-left text-sm text-foreground transition hover:border-foreground/30 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
+      >
+        <span className="min-w-0">
+          <span className="block truncate font-medium">
+            {selected ? selected.label : "Choose a starter"}
+          </span>
+          <span className="block truncate text-xs text-muted-foreground">
+            {selected ? selected.description : "Auto-fill the demo copy from a proven format."}
+          </span>
+        </span>
+        <Icon.ChevronRight
+          className={`h-4 w-4 shrink-0 text-muted-foreground transition ${open ? "rotate-90" : ""}`}
+        />
+      </button>
+
+      {open && (
+        <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-30 max-h-[340px] overflow-y-auto rounded-xl border border-border bg-elevated p-1 shadow-2xl">
+          {STARTER_TEMPLATES.map((starter) => {
+            const isSelected = starter.id === value;
+            return (
+              <button
+                key={starter.id}
+                type="button"
+                onClick={() => {
+                  onChange(starter.id);
+                  setOpen(false);
+                }}
+                className={`flex w-full items-start gap-3 rounded-lg px-3 py-2.5 text-left transition ${
+                  isSelected ? "bg-accent-glow text-foreground" : "hover:bg-card"
+                }`}
+              >
+                <span
+                  className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+                    isSelected ? "border-accent bg-accent text-accent-foreground" : "border-border"
+                  }`}
+                >
+                  {isSelected && <Icon.Check className="h-3 w-3" />}
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-sm font-medium">{starter.label}</span>
+                  <span className="mt-0.5 block text-xs leading-4 text-muted-foreground">
+                    {starter.description}
+                  </span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SegmentedTone({ value, onChange }: { value: Tone; onChange: (t: Tone) => void }) {
   const tones: Tone[] = ["Confident", "Friendly", "Technical"];
   return (
     <div className="inline-flex rounded-md border border-border bg-card p-0.5">
@@ -708,13 +1109,7 @@ function SegmentedTone({
   );
 }
 
-function TemplateRow({
-  value,
-  onChange,
-}: {
-  value: Template;
-  onChange: (t: Template) => void;
-}) {
+function TemplateRow({ value, onChange }: { value: Template; onChange: (t: Template) => void }) {
   const templates: { name: Template; desc: string; icon: keyof typeof Icon }[] = [
     { name: "Product Launch", desc: "Hero positioning + 3-act narrative", icon: "Sparkles" },
     { name: "Feature Update", desc: "Show what shipped this week", icon: "Refresh" },
@@ -754,12 +1149,16 @@ function TemplateRow({
 function GenerateButton({
   phase,
   stoppedAt,
+  dirty,
+  liveMode,
   onGenerate,
   onStop,
   onRestart,
 }: {
   phase: Phase;
   stoppedAt: number | null;
+  dirty: boolean;
+  liveMode: boolean;
   onGenerate: () => void;
   onStop: () => void;
   onRestart: () => void;
@@ -790,7 +1189,7 @@ function GenerateButton({
     return (
       <div className="flex items-center gap-2">
         <button
-          onClick={onGenerate}
+          onClick={() => onGenerate()}
           className="inline-flex h-12 flex-1 items-center justify-center gap-2 rounded-md bg-accent text-base font-medium text-accent-foreground hover:bg-accent-hover"
         >
           <Icon.Sparkles className="h-4 w-4" /> Generate Demo
@@ -808,7 +1207,7 @@ function GenerateButton({
   if (phase === "error") {
     return (
       <button
-        onClick={onGenerate}
+        onClick={() => onGenerate()}
         className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-md border-2 border-error bg-card text-base font-medium text-error hover:bg-error/10"
       >
         <Icon.Refresh className="h-4 w-4" /> Generation failed — retry?
@@ -818,12 +1217,14 @@ function GenerateButton({
 
   return (
     <button
-      onClick={onGenerate}
-      className={`inline-flex h-12 w-full items-center justify-center gap-2 rounded-md bg-accent text-base font-medium text-accent-foreground transition hover:bg-accent-hover ${
+      onClick={() => onGenerate()}
+      data-cursor="deploy"
+      className={`generate-button inline-flex h-12 w-full items-center justify-center gap-2 rounded-md bg-accent text-base font-medium text-accent-foreground transition hover:bg-accent-hover ${
         phase === "success" ? "ring-2 ring-success" : ""
       }`}
     >
-      <Icon.Sparkles className="h-4 w-4" /> Generate Demo
+      <Icon.Sparkles className="h-4 w-4" />{" "}
+      {dirty ? "Regenerate Demo" : liveMode ? "Generate with HeyGen" : "Generate Demo"}
     </button>
   );
 }
@@ -840,14 +1241,58 @@ function useEllipsis(active: boolean) {
 
 function EmptyOutput() {
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
-      <div className="flex h-14 w-14 items-center justify-center rounded-full bg-accent-glow text-accent">
-        <Icon.Sparkles className="h-6 w-6" />
+    <div className="flex h-full items-center justify-center px-4">
+      <div className="w-full max-w-2xl">
+        <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-2xl shadow-black/10">
+          <div className="flex items-center justify-between border-b border-border bg-elevated/55 px-4 py-3">
+            <div className="flex items-center gap-2">
+              <span className="h-2.5 w-2.5 rounded-full bg-error/80" />
+              <span className="h-2.5 w-2.5 rounded-full bg-warning/80" />
+              <span className="h-2.5 w-2.5 rounded-full bg-success/80" />
+            </div>
+            <span className="rounded-full border border-border bg-background px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+              Current session
+            </span>
+          </div>
+
+          <div className="relative aspect-video bg-background">
+            <div className="absolute inset-0 opacity-[0.05] [background-image:linear-gradient(90deg,currentColor_1px,transparent_1px),linear-gradient(currentColor_1px,transparent_1px)] [background-size:32px_32px]" />
+            <div className="relative flex h-full flex-col items-center justify-center px-8 text-center">
+              <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-accent/25 bg-accent-glow text-accent shadow-lg shadow-black/10">
+                <Icon.Sparkles className="h-6 w-6" />
+              </div>
+              <h2 className="mt-5 text-xl font-semibold tracking-tight">
+                Demo video will appear here
+              </h2>
+              <p className="mt-2 max-w-md text-sm leading-6 text-muted-foreground">
+                Generate a fresh HeyGen-ready preview from the inputs on the left. Finished example
+                videos stay organized in Demo Library.
+              </p>
+            </div>
+          </div>
+
+          <div className="grid border-t border-border bg-elevated/35 text-xs text-muted-foreground sm:grid-cols-3">
+            {[
+              ["Scene plan", "3-act story"],
+              ["Video render", "Avatar + captions"],
+              ["Publish", "Share + export"],
+            ].map(([label, value], index) => (
+              <div
+                key={label}
+                className={`px-4 py-3 ${index > 0 ? "border-t border-border sm:border-l sm:border-t-0" : ""}`}
+              >
+                <div className="font-medium text-foreground">{label}</div>
+                <div className="mt-0.5">{value}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <p className="mx-auto mt-4 max-w-lg text-center text-xs leading-5 text-muted-foreground">
+          Tip: use a starter template to quickly test launch, API, training, investor, and feature
+          update video styles.
+        </p>
       </div>
-      <div className="text-lg font-medium">Your demo will appear here</div>
-      <p className="max-w-sm text-sm text-muted-foreground">
-        Fill the brief on the left, hit Generate, and a 90-second video walkthrough lands here.
-      </p>
     </div>
   );
 }

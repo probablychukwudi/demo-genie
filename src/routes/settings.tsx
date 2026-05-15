@@ -5,6 +5,7 @@ import { toast } from "sonner";
 
 import { Icon } from "@/components/Icons";
 import { getSettings, saveSettings, type PublicSettings } from "@/lib/settings.functions";
+import { useAppStore } from "@/lib/store";
 
 export const Route = createFileRoute("/settings")({
   head: () => ({
@@ -23,9 +24,13 @@ function SettingsPage() {
   const [s, setS] = useState<PublicSettings | null>(null);
   const [keyInput, setKeyInput] = useState("");
   const [saving, setSaving] = useState(false);
+  const theme = useAppStore((state) => state.theme);
+  const setTheme = useAppStore((state) => state.setTheme);
 
   useEffect(() => {
-    getFn({}).then(setS).catch((e) => toast.error(e instanceof Error ? e.message : "Failed"));
+    getFn({})
+      .then(setS)
+      .catch((e) => toast.error(e instanceof Error ? e.message : "Failed"));
   }, [getFn]);
 
   if (!s) {
@@ -36,13 +41,15 @@ function SettingsPage() {
     );
   }
 
-  async function persist(patch: Partial<{
-    mockMode: boolean;
-    defaultTone: string;
-    defaultLanguage: string;
-    defaultTemplate: string;
-    heygenKey: string;
-  }>) {
+  async function persist(
+    patch: Partial<{
+      mockMode: boolean;
+      defaultTone: string;
+      defaultLanguage: string;
+      defaultTemplate: string;
+      heygenKey: string;
+    }>,
+  ) {
     setSaving(true);
     try {
       const next = await saveFn({ data: patch });
@@ -98,11 +105,15 @@ function SettingsPage() {
             </span>
           )}
         </div>
-        <label className="mt-4 block text-xs font-medium uppercase tracking-wider text-muted-foreground">
+        <label
+          htmlFor="heygen-api-key"
+          className="mt-4 block text-xs font-medium uppercase tracking-wider text-muted-foreground"
+        >
           HeyGen API Key
         </label>
         <div className="mt-1.5 flex gap-2">
           <input
+            id="heygen-api-key"
             type="password"
             value={keyInput}
             onChange={(e) => setKeyInput(e.target.value)}
@@ -124,17 +135,46 @@ function SettingsPage() {
         </p>
       </section>
 
+      {/* Appearance */}
+      <section className="mt-4 rounded-xl border border-border bg-card p-6">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <h2 className="text-base font-semibold">Appearance</h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Switch between DemoGenie's dark and light interface.
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="inline-flex items-center gap-1.5 text-sm text-muted-foreground">
+              {theme === "dark" ? (
+                <Icon.Moon className="h-4 w-4" />
+              ) : (
+                <Icon.Sun className="h-4 w-4" />
+              )}
+              {theme === "dark" ? "Dark" : "Light"}
+            </span>
+            <Toggle
+              value={theme === "light"}
+              label="Light Mode"
+              onChange={(enabled) => {
+                setTheme(enabled ? "light" : "dark");
+                toast.success(`${enabled ? "Light" : "Dark"} mode enabled`);
+              }}
+            />
+          </div>
+        </div>
+      </section>
+
       {/* Mock mode */}
       <section className="mt-4 rounded-xl border border-border bg-card p-6">
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-base font-semibold">Mock Mode</h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Use mock video (no HeyGen credits)
-            </p>
+            <p className="mt-1 text-sm text-muted-foreground">Use mock video (no HeyGen credits)</p>
           </div>
           <Toggle
             value={s.mockMode}
+            label="Mock Mode"
             onChange={(v) => {
               setS({ ...s, mockMode: v });
               void persist({ mockMode: v });
@@ -163,7 +203,9 @@ function SettingsPage() {
                 key={t}
                 onClick={() => setS({ ...s, defaultTone: t })}
                 className={`rounded px-3 py-1.5 text-sm transition ${
-                  s.defaultTone === t ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:text-foreground"
+                  s.defaultTone === t
+                    ? "bg-accent text-accent-foreground"
+                    : "text-muted-foreground hover:text-foreground"
                 }`}
               >
                 {t}
@@ -201,7 +243,9 @@ function SettingsPage() {
                   key={t}
                   onClick={() => setS({ ...s, defaultTemplate: t })}
                   className={`rounded-md border px-3 py-2 text-sm transition ${
-                    sel ? "border-accent bg-accent-glow" : "border-border bg-background hover:border-foreground/30"
+                    sel
+                      ? "border-accent bg-accent-glow"
+                      : "border-border bg-background hover:border-foreground/30"
                   }`}
                 >
                   {t}
@@ -217,18 +261,31 @@ function SettingsPage() {
         disabled={saving}
         className="mt-6 flex h-11 w-full items-center justify-center gap-2 rounded-md bg-accent text-sm font-medium text-accent-foreground transition hover:bg-accent-hover disabled:opacity-60"
       >
-        {saving ? <Icon.Loader className="h-4 w-4 animate-spin" /> : <Icon.Check className="h-4 w-4" />}
+        {saving ? (
+          <Icon.Loader className="h-4 w-4 animate-spin" />
+        ) : (
+          <Icon.Check className="h-4 w-4" />
+        )}
         Save All
       </button>
     </div>
   );
 }
 
-function Toggle({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
+function Toggle({
+  value,
+  label,
+  onChange,
+}: {
+  value: boolean;
+  label: string;
+  onChange: (v: boolean) => void;
+}) {
   return (
     <button
       type="button"
       role="switch"
+      aria-label={label}
       aria-checked={value}
       onClick={() => onChange(!value)}
       className={`relative h-6 w-11 rounded-full transition ${value ? "bg-accent" : "bg-elevated"}`}

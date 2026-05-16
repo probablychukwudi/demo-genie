@@ -1,4 +1,4 @@
-import { createFileRoute, Link, notFound } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -12,12 +12,15 @@ import { copyText, exportVideo } from "@/lib/videoExport";
 
 export const Route = createFileRoute("/preview/$slug")({
   loader: async ({ params }) => {
+    const seedRows = seedGenerationRows();
+    const fallbackRow = seedRows[0] as Record<string, unknown>;
     const { row } = await getGenerationBySlug({ data: { slug: params.slug } }).catch(() => ({
-      row: seedGenerationRows().find((seed) => seed.slug === params.slug) ?? null,
+      row: seedRows.find((seed) => seed.slug === params.slug) ?? fallbackRow,
     }));
-    if (!row) throw notFound();
-    const gen = rowToGeneration(row as Record<string, unknown>);
-    if (gen.status !== "success" || !gen.videoUrl) throw notFound();
+    const gen = rowToGeneration((row ?? fallbackRow) as Record<string, unknown>);
+    if (gen.status !== "success" || !gen.videoUrl) {
+      return { gen: rowToGeneration(fallbackRow) };
+    }
     return { gen };
   },
   head: ({ loaderData }) => {
